@@ -1,4 +1,4 @@
-
+// 10/01/2016
 /******************************************/
 /*           Unit Settings                */
 /******************************************/
@@ -40,7 +40,10 @@ byte server[] = {192, 168, 0, 21};
 #define audiovector "audio"
 #define titlevector "title"
 #define artistvector "artist"
-#define tempvector "temp" // 
+#define tempvector "temp"
+#define boilervector "boiler"
+#define weathervector "weath"
+#define settempvector "settemp"
 #define currentvector "current" // 
 #define volumevector "volume" // 
 #define playstatusvector "playstatus" // 
@@ -69,6 +72,11 @@ byte server[] = {192, 168, 0, 21};
 #define circuit4levelvector "circuit4level" //
 #define circuit5levelvector "circuit5level" //
 #define circuit6levelvector "circuit6level" //
+#define heat_fave_1_namevector "heating_fave_1_name" // NB don't enter actual audio fave names here...
+#define heat_fave_2_namevector "heating_fave_2_name" // NB don't enter actual audio fave names here...
+#define heat_fave_3_namevector "heating_fave_3_name" // NB don't enter actual audio fave names here...
+#define heat_fave_4_namevector "heating_fave_4_name" // NB don't enter actual audio fave names here...
+#define heat_fave_5_namevector "heating_fave_5_name" // NB don't enter actual audio fave names here...
 
 
 /******************************************/
@@ -106,7 +114,7 @@ byte server[] = {192, 168, 0, 21};
 //   on top of this. Keep this as LOW as poss.
 #define nameLength 11      // Light circuit, scene, and audio fave names. (suggest 12)
 #define trackLength 30     // Now Playing track: max length to accept / display onto Arduino. (suggest 60)
-#define artistLength 30    // Now Playing artist: as above. (suggest 60)
+#define artistLength 32    // Now Playing artist: as above. (suggest 60)
 
 // comment below line out if not debugging
 #define DEBUG      // code step-through
@@ -135,7 +143,7 @@ byte server[] = {192, 168, 0, 21};
 #define commandDataSelect	7	// OLED
 #define resetCtl                66      // don't ask. (separate w5100 reset)
 #define ardReset                69      // hardwired to reset pin of Arduino - physical reset by MQTT
-#define DHTPIN                  11      // DHT11 sensor (DHT22 is better, I had stock of the 11...)
+#define DHTPIN                  32      // was pin 11. With latest version of PCB, this is an external connector
 
 
 //BREADBOARD:
@@ -168,10 +176,13 @@ byte server[] = {192, 168, 0, 21};
 #define lightMode 1
 #define audioMode 2
 #define tempMode 3
-#define mvhrMode 4
-#define otherMode 5
-#define diagsMode 6
-#define settingsMode 7
+#define weatherMode 4
+#define mvhrMode 5
+#define otherMode 6
+#define diagsMode 7
+#define settingsMode 8
+
+#define modeCount 7      // This is the number of modes to cycle through. There are other "hidden" modes, settings / diags.
 
 // Proximity sense. We're calibrating this manually, using output from Serial Monitor to show us continuous values...
 // Set baseline to lowest value you read from Serial Monitor (when no hand is near sensor)
@@ -184,21 +195,27 @@ byte server[] = {192, 168, 0, 21};
 
 // Timeouts
 #define w5100resetdelay 800            // Definitely safe: 1500. Probably ok 500?
-#define startuphold 1500               // How long should we delay startup so allow us to view
-                                       //   the final page of status messages?
+#define startuphold 0                  // How long should we delay startup so allow us to view
+                                       //   the final page of status messages? (set to 0 for now as added big delays to settings request routine)
+                                       //   ... i.e. no point in delaying even more at startup
 #define button_leds_off_timeout 5000
-#define default_mode_timeout 7500
-#define display_dim_timeout 7000
-#define display_off_timeout 14000
+#define default_mode_timeout 913500
+#define display_dim_timeout 97000
+#define display_off_timeout 919000
 #define heartbeat_timeout 61000 // we expect an MQTT message at least every 60 seconds
 #define initialmqttconnecttimeout 5000 // should be 35000
+#define preset_stored_msg_timeout 1500
 
-#define mqttsettingsreqdelay 30  // Delay between requesting each setting over MQTT to allow OH to process
-#define mqttvalreqdelay 30       // Delay between requesting each value over MQTT to allow OH to process
 
-#define DHTTYPE DHT11   // DHT 11
-#define dhtpolldelay 20000    // Take reading and send every e.g. 2 seconds
+// Delay between requesting each setting / value over MQTT to allow OH to process
+// On this front, Arduino is really reliable with fast processing of MQTT, OpenHAB is not so!
+#define mqttsettingsreqdelay 400
+#define mqttvalreqdelay 400
+
+#define DHTTYPE DHT22   // DHT 22
+#define dhtpolldelay 20000    // Take reading and send every e.g. 20 seconds
 #define lightSensorDelay 1000 // #lux
+#define scrollwait 1000 // time to wait before scrolling text
 
 /******************************************/
 /*            Define settings             */
@@ -214,11 +231,24 @@ struct serverData
   int gotLevel;               // (e.g. if a settingTextVal OR settingNumberVal was downloaded successfully, this is set to 1)
 };
 
+struct weather {
+  char name[nameLength+1];
+  char min[4];
+  char max[4];
+  char precip[4];
+  char conditiontext[25];
+  char humid[4];
+};
+
 typedef struct serverData ServerData;
+typedef struct weather Weather;
+
+Weather weatherDay[5];
 
 ServerData lightCircuit[6];  // store circuit names and light levels for 6 light circuits in a room
 ServerData lightScene[5];
 ServerData audioFave[5];
+ServerData heatingProfile[5];
 
 // server values
 boolean play_status;
@@ -234,10 +264,12 @@ char zonevect[15] = {'<','d','e','f','a','u','l','t','>','\0'};        // Zone v
 char zonepmsg[30] = {' ','\0'};        // Zone pager message (29 chars max to be received from OpenHAB)
 int capThreshAdjust = capInitialThreshold;     // Zone controller proximity sense adjustment
 int lowestCapVal = 9999;  // initialise with high number
-
+boolean boiler_status;
 
 // settings
-int circuitCount = 2;
+int circuitCount = 6; // This is the initial circuit count number. This is overwritten when Arduino receives setting from OpenHAB
+                      //  set to 6 so that we catch all circuit values in the case where values arrive before the setting itself
+                      //  If we see circuit value of -1, this means we think there is a circuit but haven't got the value yet
 char commandtopic[41]; // array size: topicroot/zonevector/commandvector (max 11 + 15 + 11 respectively, plus 2x "/" strings)
 
 // OPTIMISE THIS
@@ -245,30 +277,36 @@ char buff[43]; // general buffer. char array. Assuming topicroot is max 10 chars
                // this should not ever exceed 43. #sram
 char ipString[16];  // char array for displaying the IP address at startup (and any other time, diagnostics?)
 char macString[13]; // 12 digit MAC address displayed at startup plus null terminator...
-char *modeText[] = {"LIGHT", "AUDIO", "TEMP", "MVHR", "OTHER", "DIAG", "SETTING"}; // #sram
+char *modeText[] = {"LIGHT", "AUDIO", "TEMP", "WEATHER", "MVHR", "OTHER", "DIAG", "SETTING"}; // #sram
 
 char* settingsNames[] = {"Download", "Slow downld", "Diags", "Reboot", "Exit"}; //#sram
-
 
 /******************************************/
 /*         Define global vars             */
 /******************************************/
 
-int oldPosition = 0;
+int oldPosition = 0;                 // This is for the rotary encoder
 int currentMode = lightMode;         // default mode
 int currentCircuit = 1;              // default circuit
+int currentWeatherDay = 1;           // used to cycle through weather forecast days
 unsigned long defaultmodetimer;      // used for sleep delay, capsense delay, set mode to default
+unsigned long preset_stored_msg_timer;   // How long to display the message "preset stored"
 unsigned long heartbeatsense = 0;        // We expect an MQTT message every 1 minute (60000 millis) at least
                                          // There's an OH rule sending datetime at least every minute.
                                          // We use this as our heartbeat
 unsigned long dhtpollcounter;
 unsigned long lightSensorCounter; //#lux
+unsigned long scrollTimer;
 boolean gotinfofromserver = false;
-int mqttresponsetime = 0;
+int mqttresponsetime = 0;            // Boot sequence: show OpenHAB response time, i.e. difference in time between
+                                     //  sending an MQTT request message and receiving back a value
+
+int titleoffset = 0;
 
 uint16_t lasttouched = 0;  // #prox
 uint16_t currtouched = 0;  // #prox
 uint16_t lux;              // #lux
+
 /******************************************/
 /*       Define library functions         */
 /******************************************/
@@ -311,7 +349,6 @@ void setup()
 {
   digitalWrite(ardReset, HIGH); // don't move this line :)
   
-  
   pinMode(ardReset, OUTPUT);   // Set that pin as output, if we didn't already know
   // Setup U8G
   if ( u8g.getMode() == U8G_MODE_R3G3B2 ) u8g.setColorIndex(255);                  // white
@@ -329,12 +366,11 @@ void setup()
   // MPR121 touch / proximity sense #prox
   lightMeter.begin();
   if (!cap.begin(0x5A)) {
-    Serial.println("MPR121 not found, check wiring?");
+    // MPR121 not found
   }
-  Serial.println("MPR121 found!");
 
 
-  Serial.println("Ready...");
+  // Serial.println("Ready...");
 
   // Placeholder text and populate structs before getting data from server
                                              // Light CIRCUIT
@@ -359,6 +395,28 @@ void setup()
     audioFave[i].gotName = 0;           // We don't yet have the light name
     audioFave[i].gotLevel = 0;            // We don't yet have the light level
   }
+  for (int i=0;i<5;i++) {
+    strcpy(heatingProfile[i].name,"--");       // Value not yet received from server
+    heatingProfile[i].level = -1;        // "is this the currently set audio fave": 0=no, 1=yes (or in this case, -1 saying "we don't know")
+    heatingProfile[i].gotName = 0;           // We don't yet have the light name
+    heatingProfile[i].gotLevel = 0;            // We don't yet have the light level
+  }
+  strcpy(weatherDay[0].name,"Today");
+  strcpy(weatherDay[0].min,"-1");
+  strcpy(weatherDay[0].max,"10");
+  strcpy(weatherDay[0].precip,"90");
+  strcpy(weatherDay[0].conditiontext,"Bad day");
+  strcpy(weatherDay[0].humid,"55");
+  
+  for (int i=1;i<5;i++) {
+    strcpy(weatherDay[i].name,"--");
+    strcpy(weatherDay[i].min,"55");
+    strcpy(weatherDay[i].max,"66");
+    strcpy(weatherDay[i].precip,"77");
+    strcpy(weatherDay[i].conditiontext,"Fine day!");
+    strcpy(weatherDay[i].humid,"88");
+  }
+
   strcpy(serverdatetime,"[date time]     "); // initial date time placeholder
 
   pinMode(resetCtl, OUTPUT);   // Reset W5100
@@ -458,10 +516,13 @@ void setup()
   client.subscribe(buff);  // e.g. subscribe to home/bedroom/#
   sprintf(buff, "%s/%s/#", rootvector, datetimevector);
   client.subscribe(buff);  // e.g. subscribe to home/datetime/arduinodisplay/#
-
+  sprintf(buff, "%s/%s/#", rootvector, boilervector);
+  client.subscribe(buff);
+  sprintf(buff, "%s/%s/#", rootvector, weathervector);
+  client.subscribe(buff);
   startupState(6);
 
-  delay(startuphold);
+  delay(startuphold);            // Keep the startup display on the screen... so we can see last message
   turnLEDs(1);
   pinMode(2,INPUT);
   pinMode(3,INPUT);
@@ -473,6 +534,7 @@ void setup()
 
 }
 
+// Store pretty icons to progmem
 static unsigned char light_bits[] U8G_PROGMEM = {
    0x00, 0x3e, 0x00, 0x80, 0xff, 0x00, 0xc0, 0xc1, 0x01, 0x60, 0x00, 0x03,
    0x60, 0x20, 0x03, 0x30, 0x40, 0x06, 0x30, 0x40, 0x06, 0x30, 0x00, 0x06,
@@ -531,6 +593,19 @@ static unsigned char pause_bits[] U8G_PROGMEM = {
    0xcc, 0x00, 0xcc, 0x00, 0xcc, 0x00, 0xcc, 0x00, 0xcc, 0x00, 0xcc, 0x00,
    0xcc, 0x00 };
 
+static unsigned char weather_bits[] U8G_PROGMEM = {
+   0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x80, 0x31, 0x00, 0x80, 0x33, 0x02,
+   0x00, 0x00, 0x03, 0x38, 0x0c, 0x03, 0x30, 0x7f, 0x00, 0x80, 0xff, 0x18,
+   0xc0, 0xff, 0x19, 0xcc, 0xff, 0x09, 0xce, 0xff, 0x03, 0xe0, 0xff, 0x03,
+   0xe0, 0xff, 0x3b, 0xc8, 0xff, 0x39, 0xcc, 0xff, 0x01, 0x8c, 0xff, 0x00,
+   0x00, 0x7f, 0x06, 0x60, 0x18, 0x0e, 0x60, 0x00, 0x00, 0x20, 0xe6, 0x00,
+   0x00, 0xc6, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+static unsigned char refresh_bits[] U8G_PROGMEM = {
+   0x38, 0x40, 0x42, 0xe7, 0x42, 0x02, 0x1c };
+
+static unsigned char alloff_txt[] U8G_PROGMEM = {"ALL OFF"};
+
 // Define element sizes
 #define icon_width 24           // Mode icon
 #define icon_height 24          // Mode icon
@@ -564,6 +639,14 @@ static unsigned char pause_bits[] U8G_PROGMEM = {
 
 #define preset_y_coord 61        // i.e. change this if text height needs adjusting
 
+#define presetXPos 25            // Starting position for enumerating presets
+
+// Function to insert 
+void drawTemp(unsigned int x, unsigned int y, char* displayTemp) {
+  u8g.drawStr(x, y, displayTemp);
+  static unsigned char degree_txt[3] U8G_PROGMEM = {0xb0, 'C', '\0'};
+  u8g.drawStrP(x + u8g.getStrWidth(displayTemp) + 1, y, degree_txt);
+}
 
 /******************************************/
 /*          CONTROL DRAWING               */
@@ -574,8 +657,11 @@ void drawControl(void) {
   if (millis() - heartbeatsense > heartbeat_timeout) {
     u8g.drawStr(245, 10, ":("); // Draw sad face if no signal received
   }
-
-  if (currentMode == diagsMode) {
+  if (millis() - preset_stored_msg_timer < preset_stored_msg_timeout) {
+      u8g.setFont(u8g_font_helvB12);
+      u8g.drawStr(major_text_x_coord - 20, major_text_y_coord, "Preset stored");
+  }
+  else if (currentMode == diagsMode) {
     // Draw some stuff!
 
   }
@@ -583,120 +669,242 @@ void drawControl(void) {
       // Draw nothing - display off
      } else {
 
-    // Draw icon, mode text, and ALL OFF
-    u8g.setFont(u8g_font_5x8);
-    int modeStringWidth = u8g.getStrWidth(modeText[currentMode-1]);
-    u8g.drawStr(17-(modeStringWidth/2), 9, modeText[currentMode-1]);
-    u8g.drawStr(220, 9, "ALL ORF");
-
-    u8g.drawXBMP(alloff_x_coord, alloff_y_coord, alloff_width, alloff_height, alloff_bits);
-
-    if (currentMode == lightMode) u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, light_bits);
-    if (currentMode == audioMode) u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, audio_bits);
-    if (currentMode == tempMode) u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, temp_bits);
-    if (currentMode == mvhrMode) u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, mvhr_bits);
-    if (currentMode == otherMode) u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, other_bits);
-    // Draw state & value
-    if (currentMode == audioMode) {
-      if (play_status == true) {
-        u8g.drawXBMP( 40, 13, playpause_width, playpause_height, play_bits);
-      } else {
-        u8g.drawXBMP( 40, 13, playpause_width, playpause_height, pause_bits);
-      }
-      u8g.setFont(u8g_font_6x10);
-      sprintf (buff, "%3i%", volume);
-      u8g.drawStr(audio_statustext_x_coord, audio_statustext_y_coord, buff);
-    }
-    else if (currentMode == lightMode) {
-    }
-    else if (currentMode == tempMode) {
-      u8g.setFont(u8g_font_helvB18);
-      sprintf (buff, "%3i", temp);
-      u8g.drawStr( 22, 32, buff);
-      u8g.drawXBMP( 50, 13, degree_width, degree_height, degree_bits);
-    }
-    else if (currentMode == mvhrMode) {
-      // no idea what to put here yet
-    }
-    else if (currentMode == otherMode) {
-      // no idea what to put here yet
-    }
-
-    // Draw major and minor text
-    if (currentMode == lightMode) {
-      // Write date and time
-      u8g.setFont(u8g_font_helvB12);
-      u8g.drawStr(major_text_x_coord - 20, major_text_y_coord, serverdatetime);
-
-      // Write name of current circuit
-      u8g.setFont(u8g_font_6x10);
-      u8g.drawStr(minor_text_x_coord - 20, minor_text_y_coord, lightCircuit[currentCircuit-1].name);
-
-
-
-      #define circuitSpacing 24
-
-      // Display values
-      int circuit_display_x_coord = minor_text_x_coord + 35;
-      u8g.setFont(u8g_font_6x10);
-      for (int i = 0; i < circuitCount; i++) {
-        sprintf (buff, "%i", lightCircuit[i].level);
-        u8g.drawStr (circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2), minor_text_y_coord, buff);
-        if (i == currentCircuit-1) { // indicate current circuit being controlled
-          // dot -- u8g.drawStr (circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2) - 7, minor_text_y_coord-3, ".");
-          u8g.drawLine(circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2), minor_text_y_coord+4, circuit_display_x_coord+(circuitSpacing/2) + (u8g.getStrWidth(buff)/2) -2, minor_text_y_coord+4);
+       /**************************************/
+       /*     Common items to all modes      */
+       /*     -------------------------      */
+       /**************************************/
+        // Draw presets
+        u8g.setFont(u8g_font_5x8);
+        for (int i = 0; i < 5; i++) {
+          if (currentMode == lightMode) {
+            u8g.drawStr(presetXPos + (i*51) - (u8g.getStrWidth(lightScene[i].name) /2), preset_y_coord, lightScene[i].name);
+          } else
+          if (currentMode == audioMode) {
+            u8g.drawStr(presetXPos + (i*51) - (u8g.getStrWidth(audioFave[i].name) /2), preset_y_coord, audioFave[i].name);
+          } else
+          if (currentMode == tempMode) {
+            u8g.drawStr(presetXPos + (i*51) - (u8g.getStrWidth(heatingProfile[i].name) /2), preset_y_coord, heatingProfile[i].name);
+          } else
+          if (currentMode == weatherMode) {
+            u8g.drawStr(presetXPos + (i*51) - (u8g.getStrWidth(weatherDay[i].name) /2), preset_y_coord, weatherDay[i].name);
+          } else
+          if (currentMode == settingsMode) {
+            u8g.drawStr(presetXPos + (i*51) - (u8g.getStrWidth(settingsNames[i]) /2), preset_y_coord, settingsNames[i]);
+          }
         }
-        circuit_display_x_coord = circuit_display_x_coord + circuitSpacing;
-      }
-    }
 
+        // Draw mode text and ALL OFF
+        u8g.setFont(u8g_font_5x8);
+        int modeStringWidth = u8g.getStrWidth(modeText[currentMode-1]);
+        u8g.drawStr(17-(modeStringWidth/2), 9, modeText[currentMode-1]);
 
+       /**************************************/
+       /*          Draw Light Mode           */
+       /*          ---------------           */
+       /**************************************/
+        if (currentMode == lightMode) {
 
-    else if (currentMode == audioMode) {
-      u8g.setFont(u8g_font_helvB12);
-      u8g.drawStr(major_text_x_coord, major_text_y_coord, track);
-      u8g.setFont(u8g_font_helvB08);
-      u8g.drawStr(minor_text_x_coord, minor_text_y_coord, artist);
-    }
+          // Draw icon
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, light_bits);
+          
+          // Write date and time
+          u8g.setFont(u8g_font_helvB12);
+          u8g.drawStr(major_text_x_coord - 20, major_text_y_coord, serverdatetime);
+      
+          // Write name of current circuit
+          u8g.setFont(u8g_font_6x10);
+          u8g.drawStr(minor_text_x_coord - 20, minor_text_y_coord, lightCircuit[currentCircuit-1].name);
+      
+          #define circuitSpacing 24
+      
+          // Display values
+          int circuit_display_x_coord = minor_text_x_coord + 35;
+          u8g.setFont(u8g_font_6x10);
+          for (int i = 0; i < circuitCount; i++) {
+            sprintf (buff, "%i", lightCircuit[i].level);
+            u8g.drawStr (circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2), minor_text_y_coord, buff);
+            if (i == currentCircuit-1) { // indicate current circuit being controlled
+              // dot -- u8g.drawStr (circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2) - 7, minor_text_y_coord-3, ".");
+              u8g.drawLine(circuit_display_x_coord+(circuitSpacing/2) - (u8g.getStrWidth(buff)/2), minor_text_y_coord+4, circuit_display_x_coord+(circuitSpacing/2) + (u8g.getStrWidth(buff)/2) -2, minor_text_y_coord+4);
+            }
+            circuit_display_x_coord = circuit_display_x_coord + circuitSpacing;
+          }
 
-    // Draw preset button labels
-    u8g.setFont(u8g_font_5x8);
-    int presetStringWidth;
-    int presetXPos = 25;
-    for (int i = 0; i < 5; i++) {
-      if (currentMode == lightMode) {
-        presetStringWidth = u8g.getStrWidth(lightScene[i].name);
-        u8g.drawStr(presetXPos - (presetStringWidth /2), preset_y_coord, lightScene[i].name);
-      } else if (currentMode == audioMode) {
-        presetStringWidth = u8g.getStrWidth(audioFave[i].name);
-        u8g.drawStr(presetXPos - (presetStringWidth /2), preset_y_coord, audioFave[i].name);
-      } else if (currentMode == settingsMode) {
-        presetStringWidth = u8g.getStrWidth(settingsNames[i]);
-        u8g.drawStr(presetXPos - (presetStringWidth /2), preset_y_coord, settingsNames[i]);          
-      }
-      presetXPos = presetXPos + 51;
-    } // end of for loop
+          // Draw "All Off"
+          u8g.setFont(u8g_font_5x8);
+          u8g.drawStrP(220, 9, alloff_txt);
+          // u8g.drawXBMP(alloff_x_coord, alloff_y_coord, alloff_width, alloff_height, alloff_bits);
+
+        }
+     
+       /**************************************/
+       /*           Draw Audio Mode          */
+       /*           ---------------          */
+       /**************************************/
+        if (currentMode == audioMode) {
+
+          // Draw track & artist
+          u8g.setFont(u8g_font_helvB12);
+          u8g.drawStr(major_text_x_coord + titleoffset, major_text_y_coord, track);
+          u8g.setFont(u8g_font_helvB08);
+          u8g.drawStr(minor_text_x_coord, minor_text_y_coord, artist);
+
+          // Draw blank box before drawing icon, to ensure nothing (e.g. scrolling text) obscures the icon
+          u8g.setColorIndex(0);
+          u8g.drawBox(0, icon_y_coord, major_text_x_coord - 1, icon_height);      
+          // Set colour index back to what it should be
+          if (millis() - defaultmodetimer > display_dim_timeout) { // Dim the lights
+            u8g.setColorIndex(1);         // min intensity
+          } else {
+            u8g.setColorIndex(3);         // max intensity
+          }
     
-    #define lux_val_x_coord 150
-    #define lux_val_y_coord 30
+          // Draw icon
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, audio_bits);
+
+          if (play_status == true) {
+            u8g.drawXBMP( 40, 13, playpause_width, playpause_height, play_bits);
+          } else {
+            u8g.drawXBMP( 40, 13, playpause_width, playpause_height, pause_bits);
+          }
+
+          // Draw volume
+          u8g.setFont(u8g_font_6x10);
+          sprintf (buff, "%3i%", volume);
+          u8g.drawStr(audio_statustext_x_coord, audio_statustext_y_coord, buff);
 
 
-    // Draw current room light level
-    if (showlightlevel == 1) {
-      u8g.setFont(u8g_font_6x10);
-      u8g.drawStr(178, 30, "Currently");
-      if (lux < 20) {
-        sprintf (buff, "%i%s", lux, " (dark)");
-      } else if (lux < 100) {
-        sprintf (buff, "%i%s", lux, " (med dark)");
-      } else if (lux < 400) {
-        sprintf (buff, "%i%s", lux, " (med bright)");
-      } else if (lux < 10000) {
-        sprintf (buff, "%i%s", lux, " (bright)");
-      }
-      u8g.drawStr(178, 40, buff);
-    }
+        }
 
+
+       /**************************************/
+       /*           Draw Temp Mode           */
+       /*           ---------------          */
+       /**************************************/
+        if (currentMode == tempMode) {
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, temp_bits);
+
+          // Draw boiler status
+          u8g.setFont(u8g_font_helvB12);
+          if (boiler_status) u8g.drawStr(40, major_text_y_coord, "Boiler: ON");
+            else u8g.drawStr(40, major_text_y_coord, "Boiler: OFF");
+          u8g.setFont(u8g_font_helvB08);
+          u8g.drawStr(40, minor_text_y_coord, "Current: ");
+          sprintf (buff, "%3i", temp);
+          u8g.drawStr(85, minor_text_y_coord, buff);
+          u8g.drawStr(118, minor_text_y_coord, "Set: ");
+          sprintf (buff, "%3i%", temp_target);
+          u8g.drawStr(142, minor_text_y_coord, buff);
+          u8g.drawStr(180, minor_text_y_coord, "LDN: ");
+          u8g.drawStr(210, minor_text_y_coord, "12");
+        }
+
+
+       /**************************************/
+       /*           Draw Weather Mode        */
+       /*           ----------------         */
+       /**************************************/
+        if (currentMode == weatherMode) {
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, weather_bits);
+
+          #define weather_current_temp_x 68
+          #define weather_current_temp_y 28
+          #define weather_lo_x 33
+          #define weather_lo_y 24
+          #define weather_hi_x 33
+          #define weather_hi_y 34
+
+          #define weather_day_x 115
+          #define weather_day_y 28
+          #define weather_desc_x 68
+          #define weather_desc_y 40
+
+          #define weather_update_x 175
+          #define weather_update_y 9
+          #define weather_refresh_icon_x 162
+          #define weather_refresh_icon_y 2
+          #define weather_refresh_width 8
+          #define weather_refresh_height 7
+
+          #define weather_precip_x 68
+          #define weather_precip_y 39
+          #define weather_pressure_x 117
+          #define weather_pressure_y 39
+          #define weather_humidity_x 167
+          #define weather_humidity_y 39
+
+          #define weather_sunrise_x 60
+          #define weather_sunrise_y 9
+          #define weather_sunset_x 100
+          #define weather_sunset_y 9
+
+          // Top row
+//          u8g.setFont(u8g_font_5x8);
+//          u8g.drawStr(weather_sunrise_x, weather_sunrise_y, "08:04");
+//          u8g.drawStr(weather_sunset_x, weather_sunset_y, "16:30");
+//          u8g.drawXBMP(weather_refresh_icon_x,weather_refresh_icon_y,weather_refresh_width,weather_refresh_height,refresh_bits);
+//          u8g.drawStr(weather_update_x, weather_update_y, "11/01/2016 18:27");
+          
+            // HI / LO
+            u8g.setFont(u8g_font_6x10);
+            drawTemp(weather_lo_x, weather_lo_y, weatherDay[1].min);
+            drawTemp(weather_hi_x, weather_hi_y, weatherDay[1].max);
+  
+            // Temp
+            u8g.setFont(u8g_font_helvB12);
+            drawTemp(weather_current_temp_x, weather_current_temp_y, "26");
+  
+            // Day
+            u8g.drawStr(weather_day_x, weather_day_y, weatherDay[currentWeatherDay-1].name);
+  
+            // Description
+            u8g.setFont(u8g_font_helvB08);
+            u8g.drawStr(weather_desc_x, weather_desc_y, weatherDay[currentWeatherDay-1].conditiontext);
+            
+            // Bottom row
+  //          u8g.setFont(u8g_font_helvB08);
+  //          u8g.drawStr(weather_precip_x, weather_precip_y, "precip");
+  //          u8g.drawStr(weather_pressure_x, weather_pressure_y, "pressr");
+  //          u8g.drawStr(weather_humidity_x, weather_humidity_y, "humid");
+ 
+            
+          }
+
+       /**************************************/
+       /*           Draw Other Modes         */
+       /*           ----------------         */
+       /**************************************/
+        if (currentMode == mvhrMode) {
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, mvhr_bits);
+        }
+        if (currentMode == otherMode) {
+          u8g.drawXBMP(icon_x_coord, icon_y_coord, icon_width, icon_height, other_bits);
+        }
+
+    
+       /**************************************/
+       /*         Testing components         */
+       /*         ------------------         */
+       /**************************************/
+        #define lux_val_x_coord 150
+        #define lux_val_y_coord 30
+    
+    
+        // Draw current room light level
+        if (showlightlevel == 1) {
+          u8g.setFont(u8g_font_6x10);
+          u8g.drawStr(178, 30, "Currently");
+          if (lux < 20) {
+            sprintf (buff, "%i%s", lux, " (dark)");
+          } else if (lux < 100) {
+            sprintf (buff, "%i%s", lux, " (med dark)");
+          } else if (lux < 400) {
+            sprintf (buff, "%i%s", lux, " (med bright)");
+          } else if (lux < 10000) {
+            sprintf (buff, "%i%s", lux, " (bright)");
+          }
+          u8g.drawStr(178, 40, buff);
+        }
     
   } // end of "if display is displaying stuff"
 } // end of drawControl function
@@ -723,11 +931,11 @@ void loop()
   for (uint8_t i=0; i<12; i++) {
     // it if *is* touched and *wasnt* touched before, alert!
     if ((currtouched & _BV(i)) && !(lasttouched & _BV(i)) ) {
-      Serial.print(i); Serial.println(" touched");
+      // Serial.print(i); Serial.println(" touched");
     }
     // if it *was* touched and now *isnt*, alert!
     if (!(currtouched & _BV(i)) && (lasttouched & _BV(i)) ) {
-      Serial.print(i); Serial.println(" released");
+      // Serial.print(i); Serial.println(" released");
     }
   }
   // reset our state
@@ -738,9 +946,9 @@ void loop()
   /******************************************/
   if (millis() - lightSensorCounter > lightSensorDelay) {
     lux = lightMeter.readLightLevel();
-    Serial.print("Light: ");
-    Serial.print(lux);
-    Serial.println(" lx");
+    // Serial.print("Light: ");
+    // Serial.print(lux);
+    // Serial.println(" lx");
     lightSensorCounter = millis();
   }
 
@@ -778,6 +986,21 @@ void loop()
   /*  Dim display, lights, sleep mode etc.  */
   /*  This needs a bit of tidying, was lazy */
   /******************************************/
+    
+    u8g.setFont(u8g_font_helvB12); // set font, for the purposes of working out what the width of the track text is
+    int overflowamount = u8g.getStrWidth(track) - 256 - major_text_x_coord;
+
+    if (u8g.getStrWidth(track) > 256 - major_text_x_coord) {
+      if (millis() - scrollTimer > scrollwait) { // start to do the scroll after waiting
+        if (titleoffset > overflowamount - 150) {
+          titleoffset--;
+        } else {
+          scrollTimer = millis();
+          titleoffset = 0;
+        }
+      }
+    }
+    
     if (millis() - defaultmodetimer > button_leds_off_timeout) { // Dim the lights
       turnLEDs(0);
     } else {
@@ -821,11 +1044,16 @@ void loop()
   if (btnTransport.clicks == 2) buttonFunc ("rotaryDouble");   // Double press rotary
   if (btnTransport.clicks == 3) buttonFunc ("rotaryTriple");   // Triple press rotary
   if (btnF1.clicks == 1) buttonFunc ("Button1");               // Press Favourite button 1
+  if (btnF1.clicks == -1) buttonFunc ("Store1");               // Store Favourite 1
   if (btnF1.clicks == 2) buttonFunc ("enterSettings");            // Double press Fave 2 button to download from server again
   if (btnF2.clicks == 1) buttonFunc ("Button2");               // Press Favourite button 2
+  if (btnF2.clicks == -1) buttonFunc ("Store2");               // Press Favourite button 2
   if (btnF3.clicks == 1) buttonFunc ("Button3");               // Press Favourite button 3
+  if (btnF3.clicks == -1) buttonFunc ("Store3");               // Press Favourite button 3
   if (btnF4.clicks == 1) buttonFunc ("Button4");               // Press Favourite button 4
+  if (btnF4.clicks == -1) buttonFunc ("Store4");               // Press Favourite button 4
   if (btnF5.clicks == 1) buttonFunc ("Button5");               // Press Favourite button 5
+  if (btnF5.clicks == -1) buttonFunc ("Store5");               // Press Favourite button 5
   if (btnOrf.clicks == 1) buttonFunc ("Orf");                  // Press Favourite button 5
 
   /******************************************/
@@ -835,17 +1063,17 @@ void loop()
   if (newPosition > oldPosition) {
     oldPosition = newPosition;
     rotaryFunc("up");
-    Serial.println("Up");
+    // Serial.println("Up");
   }
   else if (newPosition < oldPosition) {
     oldPosition = newPosition;
     rotaryFunc("down");
-    Serial.println("Down");
+    // Serial.println("Down");
   }
   client.loop();
   } // END U8G
   while( u8g.nextPage() ); // END U8G
-}
+} // end of loop
 
 
 /******************************************/
@@ -859,7 +1087,13 @@ void buttonFunc(char* buttonName) // Function to handle button presses, includin
   // Set the mode
 
   // Cycle through all modes except last two, settings and diags
-  if (buttonName == "cyclemodes") {if (currentMode < 5) currentMode++; else currentMode = 1;}
+  if (buttonName == "cyclemodes") {
+    if (currentMode == 1) {
+       scrollTimer = millis();  // if we changed to audio mode 2, start the scrollcounter
+       titleoffset = 0;
+    }
+    if (currentMode < modeCount) currentMode++; else currentMode = 1;
+  }
   
   // Enter settings if double press happened. Diags mode is entered only through settings mode, so no
   // need for this to be done here
@@ -872,6 +1106,26 @@ void buttonFunc(char* buttonName) // Function to handle button presses, includin
     if (buttonName == "Button3") client.publish(commandtopic, "Light3");
     if (buttonName == "Button4") client.publish(commandtopic, "Light4");
     if (buttonName == "Button5") client.publish(commandtopic, "Light5");
+    if (buttonName == "Store1") {
+    	client.publish(commandtopic, "StoreScene1");
+    	preset_stored_msg_timer = millis();
+    }
+    if (buttonName == "Store2") {
+    	client.publish(commandtopic, "StoreScene2");
+    	preset_stored_msg_timer = millis();
+    }
+    if (buttonName == "Store3") {
+    	client.publish(commandtopic, "StoreScene3");
+    	preset_stored_msg_timer = millis();
+    }
+    if (buttonName == "Store4") {
+    	client.publish(commandtopic, "StoreScene4");
+    	preset_stored_msg_timer = millis();
+    }
+    if (buttonName == "Store5") {
+    	client.publish(commandtopic, "StoreScene5");
+    	preset_stored_msg_timer = millis();
+    }
     if (buttonName == "rotarySingle") {if (currentCircuit < circuitCount) currentCircuit++; else currentCircuit = 1;}
     if (buttonName == "rotaryDouble"); // Do something here, e.g. toggle light state
   }
@@ -886,11 +1140,18 @@ void buttonFunc(char* buttonName) // Function to handle button presses, includin
     if (buttonName == "rotaryTriple") client.publish(commandtopic, "prev");
   }
   if (currentMode == tempMode) {
-    if (buttonName == "Button1") ; // Do something here
-    if (buttonName == "Button2") ; // Do something here
-    if (buttonName == "Button3") ; // Do something here
-    if (buttonName == "Button4") ; // Do something here
-    if (buttonName == "Button5") ; // Do something here
+    if (buttonName == "Button1") client.publish(commandtopic, "Heat1"); // Do something here
+    if (buttonName == "Button2") client.publish(commandtopic, "Heat2"); // Do something here
+    if (buttonName == "Button3") client.publish(commandtopic, "Heat3"); // Do something here
+    if (buttonName == "Button4") client.publish(commandtopic, "Heat4"); // Do something here
+    if (buttonName == "Button5") client.publish(commandtopic, "Heat5"); // Do something here
+  }
+  if (currentMode == weatherMode) {
+    if (buttonName == "Button1") currentWeatherDay = 1;
+    if (buttonName == "Button2") currentWeatherDay = 2;
+    if (buttonName == "Button3") currentWeatherDay = 3;
+    if (buttonName == "Button4") currentWeatherDay = 4;
+    if (buttonName == "Button5") currentWeatherDay = 5;
   }
   if (currentMode == mvhrMode) {
     if (buttonName == "Button1") ; // Do something here
@@ -909,8 +1170,6 @@ void buttonFunc(char* buttonName) // Function to handle button presses, includin
   if (currentMode == settingsMode) {
     if (buttonName == "Button1") gotinfofromserver = false; // Re-fetch server data
     if (buttonName == "Button2") {     // Re-fetch server data ... slooowly (delay between requests, gives time for OH to respond
-      #define mqttsettingsreqdelay 90  // Delay between requesting each setting over MQTT to allow OH to process
-      #define mqttvalreqdelay 90       // Delay between requesting each value over MQTT to allow OH to process
       gotinfofromserver = false;
     }
     if (buttonName == "Button3") currentMode = diagsMode;   // Go into diagnostic mode. (When in this mode, it stays forever until button press, this is set up in loop)
@@ -925,52 +1184,60 @@ void buttonFunc(char* buttonName) // Function to handle button presses, includin
 void requestSettingsFromServer()
 {
   client.publish(commandtopic, "circuit_count_please");                  // Request how many light circuits there are
+  turnLEDs(1);
   delay(mqttsettingsreqdelay);
   client.publish(commandtopic, "circuit_names_please");                  // Request light circuit names
+  turnLEDs(0);
   delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "light_scene_1_name_please");             // Request light scene 1 name
+  client.publish(commandtopic, "light_scenes_please");             // Request light scene 1 name
+  turnLEDs(1);
   delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "light_scene_2_name_please");             // Request light scene 2 name
+  client.publish(commandtopic, "audio_faves_please");              // Request audio fave 1 name
+  turnLEDs(0);
   delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "light_scene_3_name_please");             // Request light scene 3 name
+  client.publish(commandtopic, "heat_faves_please");             // Request heating profile 1 name
+  turnLEDs(1);
   delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "light_scene_4_name_please");             // Request light scene 4 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "light_scene_5_name_please");             // Request light scene 5 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "audio_fave_1_name_please");              // Request audio fave 1 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "audio_fave_2_name_please");              // Request audio fave 2 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "audio_fave_3_name_please");              // Request audio fave 3 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "audio_fave_4_name_please");              // Request audio fave 4 name
-  delay(mqttsettingsreqdelay);
-  client.publish(commandtopic, "audio_fave_5_name_please");              // Request audio fave 5 name
-  delay(mqttsettingsreqdelay);
+
+  defaultmodetimer = millis(); // reset last action time - this brings device out of sleep
+
 }
 
 void requestValuesFromServer()
 {      client.publish(commandtopic, "datetime_please");           // Request date (one-off... OH to send new value at top of each minute)
+  turnLEDs(0);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "light_scene_please");        // Request current light scene
+  turnLEDs(1);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "light_levels_please");       // Request light circuit levels
+  turnLEDs(0);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "volume_please");             // Request volume
+  turnLEDs(1);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "play_status_please");        // Request play status
+  turnLEDs(0);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "track_please");              // Request track
+  turnLEDs(1);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "artist_please");             // Request album
+  turnLEDs(0);
       delay(mqttvalreqdelay);
-      client.publish(commandtopic, "temp_please");               // Request current room temp
+      client.publish(commandtopic, "boiler_status_please");
+  turnLEDs(1);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "temp_target_please");        // Request room temp setting
+  turnLEDs(0);
       delay(mqttvalreqdelay);
       client.publish(commandtopic, "mvhr_speed_please");         // Request MVHR speed seeting
+  turnLEDs(1);
       delay(mqttvalreqdelay);
+      client.publish(commandtopic, "weather_please");        // Request all weather values
+  turnLEDs(0);
+      delay(mqttvalreqdelay);
+  defaultmodetimer = millis(); // reset last action time - this brings device out of sleep
 }
 
 void rotaryFunc(char direction[5]) // array with 5 elements to cope with the word "down" and a null terminator
@@ -1033,18 +1300,20 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
     if (payload[4]==83) {                                  // capacitance adjustment value
       char capValRead[3];
-      for (int i=0; i<2; i++) capValRead[i] = payload[i+9]; 
+      for (int i=0; i<2; i++) capValRead[i] = payload[i+9];
       capThreshAdjust = atoi( (const char*) capValRead);                   // zone controller proximity adjustment
     }
-    if (payload[4]==82) {
-      //resetFunc();
-      digitalWrite(ardReset, LOW);
+    if (payload[4]==82) {                                  // Remote reboot
+      resetFunc();
+      //digitalWrite(ardReset, LOW);
     }
-    if (payload[4]==85) {
+    if (payload[4]==85) {                                  // Update controller (i.e. send MQTT requests to download settings / data)
       gotinfofromserver = false;
+      defaultmodetimer = millis(); // reset last action time - this brings device out of sleep
+
     }
   }
-  
+
   // perhaps here instead we should get all audio strings into one vector like this:
   // home/bedroom/audio -> artist: Jeith Karrett
   // home/bedroom/audio -> title: Sca Lala
@@ -1053,28 +1322,65 @@ void callback(char* topic, byte* payload, unsigned int length) {
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, audiovector, titlevector);
   if(strcmp(topic, buff) == 0)                  // found a title
   {
-    for (int i=0; i<trackLength+1; ++i)
-    track[i] = payload[i];
-/*
-    titlelength = u8g.getStrWidth(track);
-
-    Serial.print("Title length: ");
-    Serial.println(titlelength);
-    Serial.print("Title width: ");
- 
-    Serial.println(titlelength);
-    scrollcounter = 200;
-    x_pos = 3;
-*/
+    // If the track title is not longer than the supported number of characters, write the characters to the track array
+    //  null terminator is already set above (payload[length] = '\0')
+    if (length <= trackLength) {
+      for (int i=0; i<=length; i++) {
+      track[i] = payload[i];
+     }
+    } else {
+    // If the track title is longer than the supported number of characters, write to the track array
+    //  we need to set null terminator after the end of the supported number of chars
+      for (int i=0; i<trackLength; i++) {
+        track[i] = payload[i];
+      }
+      track[trackLength] = '\0';
+    }
+    scrollTimer = millis();  // if track changed, reset scroll timer
+    titleoffset = 0;
   }
+
+  sprintf (buff,"%s/%s/%s", rootvector, weathervector, "now");  // home/weath/now
+  sprintf (buff,"%s/%s/%s", rootvector, weathervector, "0");  // home/weath/0
+  
+  for (int h=1;h<5;h++) {
+    sprintf (buff,"%s/%s/%i", rootvector, weathervector, h);  // home/weath/1-5
+      if(strcmp(topic, buff) == 0) {
+        int i=0;
+        char buff2[6];
+        do {
+          weatherDay[h].name[i] = payload[i];
+          i++;
+        } while (payload[i] != ';');
+        do {
+          weatherDay[h].min[i] = payload[i];
+          i++;
+        } while (payload[i] != ';');
+        
+      }
+    }
+    
+
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, audiovector, artistvector); // home/bedroom/audio/artist
     if(strcmp(topic, buff) == 0) for (int i=0; i<artistLength+1; ++i) artist[i] = payload[i];
   sprintf (buff, "%s/%s", rootvector, datetimevector); // home/datetime/arduinodisplay
     if(strcmp(topic, buff) == 0) for (int i=0; i<17; ++i) serverdatetime[i] = payload[i];
-
-
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, tempvector, currentvector); // home/bedroom/temp/current
-  if(strcmp(topic, buff) == 0) temp = atoi( (const char*) payload );
+  //if(strcmp(topic, buff) == 0) temp = atoi( (const char*) payload );
+  
+  if(strcmp(topic, "home/boiler") == 0) {
+    // Serial.println("Found a boiler status");
+    if (payload[1]==78) {
+      boiler_status=true;
+      // Serial.println("the boiler status was TRUE - i.e. on");
+    }
+    else boiler_status=false;
+    // Serial.println("the boiler status was FALSE - i.e. off");
+  }
+
+  sprintf (buff, "%s/%s/%s", rootvector, zonevect, settempvector); // home/bedroom/settemp
+  if(strcmp(topic, buff) == 0) temp_target = atoi( (const char*) payload );
+
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, audiovector, volumevector); // home/bedroom/audio/volume
   if(strcmp(topic, buff) == 0) volume = atoi( (const char*) payload );
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, audiovector, playstatusvector); // home/bedroom/audio/playstatus
@@ -1127,7 +1433,23 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if(strcmp(topic, buff) == 0) lightCircuit[4].level = atoi( (const char*) payload );
   sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, lightvector, circuit6levelvector); // home/bedroom/light/circuit6level
   if(strcmp(topic, buff) == 0) lightCircuit[5].level = atoi( (const char*) payload );
+
+  sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, settingsvector, heat_fave_1_namevector); // home/bedroom/settings/heat_fave_1_name
+  if(strcmp(topic, buff) == 0) for (int i=0; i<nameLength+1; ++i) heatingProfile[0].name[i] = payload[i];
+  sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, settingsvector, heat_fave_2_namevector); // home/bedroom/settings/heat_fave_2_name
+  if(strcmp(topic, buff) == 0) for (int i=0; i<nameLength+1; ++i) heatingProfile[1].name[i] = payload[i];
+  sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, settingsvector, heat_fave_3_namevector); // home/bedroom/settings/heat_fave_3_name
+  if(strcmp(topic, buff) == 0) for (int i=0; i<nameLength+1; ++i) heatingProfile[2].name[i] = payload[i];
+  sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, settingsvector, heat_fave_4_namevector); // home/bedroom/settings/heat_fave_4_name
+  if(strcmp(topic, buff) == 0) for (int i=0; i<nameLength+1; ++i) heatingProfile[3].name[i] = payload[i];
+  sprintf (buff, "%s/%s/%s/%s", rootvector, zonevect, settingsvector, heat_fave_5_namevector); // home/bedroom/settings/heat_fave_5_name
+  if(strcmp(topic, buff) == 0) for (int i=0; i<nameLength+1; ++i) heatingProfile[4].name[i] = payload[i];
+
+
+
+
 }
+
 
 void startupState(int state) {
   #define status_x 155
@@ -1136,7 +1458,7 @@ void startupState(int state) {
   u8g.firstPage();  // START U8G
   do {
       u8g.setFont(u8g_font_helvB12);
-      u8g.drawStr(15, 15, F("Welcome to casa Mat & Anna")); // Welcome to casa Mat & Anna!
+      u8g.drawStr(15, 15, F("Welcome to Mat Anna Malakai")); // Welcome to casa Mat & Anna!
       u8g.setFont(u8g_font_6x12);
 
       if (state == 1) {
